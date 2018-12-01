@@ -1,0 +1,270 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "route53_backup.template - Route53 Zone Record Backup on S3 Bucket",
+  "Parameters": {
+    "RoleName": {
+      "Default": "route53lambdabackup2018",
+      "Type": "String",
+      "Description": "Role Name OPTIONAL"
+    },
+    "BucketName": {
+      "AllowedPattern": "([a-z0-9\\.-]+)",
+      "Type": "String",
+      "ConstraintDescription": "The bucket name must contain only lowercase letters, numbers, periods (.), and dashes (-).",
+      "Description": "route53lambdabackup2018 Bucket Name REQUIRED"
+    }
+  },
+  "Conditions": {
+    "SetRoleName": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "RoleName"
+            },
+            ""
+          ]
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "S3Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {
+          "Ref": "BucketName"
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        }
+      }
+    },
+    "LambdaInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "Route53BackupLambdaFunction"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "route53lambdabackup2018rule",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "Route53BackupLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Handler": "index.lambda_handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "route53lambdabackup2018",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "import boto3",
+                "import json",
+                "import sys",
+                "import os",
+                "import tempfile",
+                "import time",
+                "from datetime import date\n",
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "backup_bucket = '",
+                      {
+                        "Ref": "BucketName"
+                      },
+                      "'"
+                    ]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "region = '",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      "'"
+                    ]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "source_account = '",
+                      {
+                        "Ref": "AWS::AccountId"
+                      },
+                      "'"
+                    ]
+                  ]
+                },
+                "today = str(date.today().strftime('%Y%m%d'))\n",
+                "def lambda_handler(event, context):\n",
+                "    sts_client = boto3.client('sts')\n",
+                "    assumedRoleObject = sts_client.assume_role(",
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "\t\tRoleArn=\"",
+                      {
+                        "Fn::GetAtt": [
+                          "route53lambdabackup2018",
+                          "Arn"
+                        ]
+                      },
+                      "\","
+                    ]
+                  ]
+                },
+                "    \tRoleSessionName=\"route53lambdabackup2018\"",
+                "\t)\n",
+                "    credentials = assumedRoleObject['Credentials']\n",
+                "    route53 = boto3.client(",
+                "            'route53',",
+                "            region_name=region,",
+                "            aws_access_key_id = credentials['AccessKeyId'],",
+                "            aws_secret_access_key = credentials['SecretAccessKey'],",
+                "            aws_session_token = credentials['SessionToken']",
+                "    )\n",
+                "    s3 = boto3.client('s3')\n",
+                "    try:\n",
+                "        paginate_hosted_zones = route53.get_paginator('list_hosted_zones')\n",
+                "        zones = route53.list_hosted_zones()['HostedZones']\n",
+                "        for zone in zones:\n",
+                "            zone_name = zone['Name']\n",
+                "            zonelist = zone['Id']\n",
+                "            zone_id = zonelist.split('/')[2]",
+                "            paginate_resource_record_sets = route53.get_paginator('list_resource_record_sets')\n",
+                "            for record_page in paginate_resource_record_sets.paginate(HostedZoneId = zone['Id']):\n",
+                "                for record in record_page['ResourceRecordSets']:\n",
+                "                    if record.get('ResourceRecords'):\n",
+                "                        for target in record['ResourceRecords']:\n",
+                "                            orig_stdout = sys.stdout\n",
+                "                            f = open('/tmp/' + today + '-' + zone_id , 'a+')\n",
+                "                            sys.stdout = f\n",
+                "                            print(record['Name'], record['TTL'], 'IN', record['Type'], target['Value'], sep = '\t')\n",
+                "                            sys.stdout = orig_stdout\n",
+                "                            f.close()\n",
+                "                    elif record.get('AliasTarget'):\n",
+                "                        orig_stdout = sys.stdout\n",
+                "                        f = open('/tmp/' + today + '-' + zone_id , 'a+')\n",
+                "                        sys.stdout = f\n",
+                "                        print(record['Name'], 300, 'ALIAS', record['Type'], record['AliasTarget']['DNSName'], record['AliasTarget']['HostedZoneId'], record['AliasTarget']['EvaluateTargetHealth'], sep = '\t')\n",
+                "                        sys.stdout = orig_stdout\n",
+                "                        f.close()\n",
+                "                    else:\n",
+                "                        raise Exception('Unknown record type: {}'.format(record))\n",
+                "            s3.upload_file('/tmp/' + today + '-' + zone_id,backup_bucket,today + '-' +  zone_id + '-' + zone_name + 'txt')\n",
+                "            os.remove('/tmp/' + today + '-' + zone_id)\n",
+                "    except Exception as e:",
+                "        print(e)"
+              ]
+            ]
+          }
+        },
+        "Runtime": "python3.6",
+        "Timeout": "300"
+      }
+    },
+    "route53lambdabackup2018rule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": "route53lambdabackup2018",
+        "Description": "TriggerBackup",
+        "EventPattern": {
+          "source": [
+            "aws.route53"
+          ]
+        },
+        "ScheduleExpression": "rate(14 days)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "Route53BackupLambdaFunction",
+                "Arn"
+              ]
+            },
+            "Id": "index"
+          }
+        ]
+      }
+    },
+    "route53lambdabackup2018": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::If": [
+            "SetRoleName",
+            {
+              "Ref": "RoleName"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "lambdainline",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sts:AssumeRole",
+                    "logs:*",
+                    "route53:Get*",
+                    "route53:List*",
+                    "route53:TestDNSAnswer",
+                    "s3:*"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ],
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/AmazonS3FullAccess",
+          "arn:aws:iam::aws:policy/AmazonRoute53ReadOnlyAccess"
+        ]
+      }
+    }
+  }
+}
