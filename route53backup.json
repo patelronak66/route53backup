@@ -193,7 +193,7 @@
             "aws.route53"
           ]
         },
-        "ScheduleExpression": "rate(14 days)",
+        "ScheduleExpression": "rate(1 days)",
         "State": "ENABLED",
         "Targets": [
           {
